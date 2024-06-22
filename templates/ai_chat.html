@@ -1,0 +1,86 @@
+{% extends 'base.html' %}
+
+{% block title %}
+AI Chat - Finance Tracker
+{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <h2>AI Chat</h2>
+    <div id="chat-window" class="border rounded p-3 mb-4" style="height: 400px; overflow-y: auto; background-color: #f9f9f9;">
+        {% for message in history %}
+            {% if message.type == 'user' %}
+                <div class="alert alert-primary" role="alert" style="text-align: right;">
+                    {{ message.content }}
+                </div>
+            {% elif message.type == 'bot' %}
+                <div class="alert alert-success" role="alert">
+                    {% for expense in message.content %}
+                        <div><strong>Date:</strong> {{ expense.date }}</div>
+                        <div><strong>Category:</strong> {{ expense.category }}</div>
+                        <div><strong>Amount:</strong> ₹{{ expense.amount }}</div>
+                        <div><strong>Description:</strong> {{ expense.description }}</div>
+                        <div><strong>Payment Method:</strong> {{ expense.payment_method }}</div>
+                        <hr>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endfor %}
+    </div>
+    <form id="chat-form">
+        <div class="mb-3">
+            <label for="user_input" class="form-label">Enter your transaction details:</label>
+            <input type="text" id="user_input" name="user_input" class="form-control" required>
+        </div>
+        <button type="submit" class="btn btn-primary">Submit</button>
+    </form>
+    <div id="chat-response" class="mt-4"></div>
+</div>
+
+<script>
+    document.getElementById('chat-form').addEventListener('submit', function(event) {
+        event.preventDefault();
+        const userInput = document.getElementById('user_input').value;
+
+        fetch('{{ url_for("ai_chat") }}', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ user_input: userInput })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'success') {
+                const chatWindow = document.getElementById('chat-window');
+                chatWindow.innerHTML += `
+                    <div class="alert alert-primary" role="alert" style="text-align: right;">
+                        ${userInput}
+                    </div>
+                `;
+                data.expenses.forEach(expense => {
+                    chatWindow.innerHTML += `
+                        <div class="alert alert-success" role="alert">
+                            <div><strong>Date:</strong> ${expense.date}</div>
+                            <div><strong>Category:</strong> ${expense.category}</div>
+                            <div><strong>Amount:</strong> ₹${expense.amount}</div>
+                            <div><strong>Description:</strong> ${expense.description}</div>
+                            <div><strong>Payment Method:</strong> ${expense.payment_method}</div>
+                            <hr>
+                        </div>
+                    `;
+                });
+                chatWindow.innerHTML += `
+                    <div class="alert alert-info" role="alert">
+                        Want to add another transaction?
+                    </div>
+                `;
+                chatWindow.scrollTop = chatWindow.scrollHeight;
+                document.getElementById('user_input').value = '';
+            } else {
+                document.getElementById('chat-response').innerHTML = `<div class="alert alert-danger">${data.message}</div>`;
+            }
+        });
+    });
+</script>
+{% endblock %}

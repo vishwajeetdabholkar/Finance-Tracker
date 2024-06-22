@@ -1,0 +1,50 @@
+{% extends 'base.html' %}
+
+{% block title %}
+Setup Database - Finance Tracker
+{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <h2>Setup Database Connection</h2>
+    <form action="{{ url_for('setup') }}" method="post">
+        <div class="mb-3">
+            <label for="db_uri" class="form-label">Database URI:</label>
+            <input type="text" id="db_uri" name="db_uri" class="form-control" required>
+        </div>
+        <div class="mb-3">
+            <label for="db_name" class="form-label">Database Name:</label>
+            <input type="text" id="db_name" name="db_name" class="form-control" required>
+        </div>
+        <button type="submit" class="btn btn-primary">Submit</button>
+    </form>
+</div>
+
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        // Disable buttons initially
+        const navItems = document.querySelectorAll('.nav-item');
+        navItems.forEach(item => {
+            if (item.querySelector('a').textContent !== 'Setup Database') {
+                item.querySelector('a').classList.add('disabled');
+            }
+        });
+
+        // Enable buttons on successful setup
+        const form = document.querySelector('form');
+        form.addEventListener('submit', function(event) {
+            event.preventDefault();
+            fetch('{{ url_for("setup") }}', {
+                method: 'POST',
+                body: new FormData(form)
+            }).then(response => {
+                if (response.ok) {
+                    window.location.href = '{{ url_for("login") }}';
+                } else {
+                    alert('Failed to connect to the database. Please check your connection details.');
+                }
+            });
+        });
+    });
+</script>
+{% endblock %}

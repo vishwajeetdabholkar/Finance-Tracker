@@ -1,0 +1,238 @@
+{% extends 'base.html' %}
+
+{% block title %}
+Statistics - Finance Tracker
+{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <h2>Statistics</h2>
+    
+    <!-- Filter Form -->
+    <form method="post" action="{{ url_for('statistics') }}">
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <label for="month" class="form-label">Month</label>
+                <select id="month" name="month" class="form-select">
+                    {% for i in range(1, 13) %}
+                        <option value="{{ '{:02d}'.format(i) }}" {% if selected_month == '{:02d}'.format(i) %}selected{% endif %}>
+                            {{ datetime(2000, i, 1).strftime('%B') }}
+                        </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-6">
+                <label for="year" class="form-label">Year</label>
+                <select id="year" name="year" class="form-select">
+                    {% for i in range(2020, 2031) %}
+                        <option value="{{ i }}" {% if selected_year == i|string %}selected{% endif %}>{{ i }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
+        <button type="submit" class="btn btn-primary mb-4">Filter</button>
+    </form>
+
+    <!-- Total Expenses -->
+    <div class="card mb-4">
+        <div class="card-header">
+            Total Expenses
+        </div>
+        <div class="card-body">
+            <h5 class="card-title">₹{{ total_expenses }}</h5>
+        </div>
+    </div>
+
+    <!-- Charts Row -->
+    <div class="row">
+        <!-- Expense Breakdown by Category -->
+        <div class="col-md-6">
+            <div class="card mb-4">
+                <div class="card-header">
+                    Expense Breakdown by Category
+                </div>
+                <div class="card-body">
+                    <canvas id="categoryChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Top Spending Categories -->
+        <div class="col-md-6">
+            <div class="card mb-4">
+                <div class="card-header">
+                    Top Spending Categories
+                </div>
+                <div class="card-body">
+                    <canvas id="topCategoriesChart"></canvas>
+                </div>
+            </div>
+
+            <div class="card mb-4">
+                <div class="card-header">
+                    Daily Spending
+                </div>
+                <div class="card-body">
+                    <canvas id="dailySpendingChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+    // Data for Expense Breakdown by Category
+    const categoryLabels = {{ expense_by_category.keys()|list|tojson }};
+    const categoryData = {{ expense_by_category.values()|list|tojson }};
+
+    const categoryCtx = document.getElementById('categoryChart').getContext('2d');
+    const categoryChart = new Chart(categoryCtx, {
+        type: 'doughnut',
+        data: {
+            labels: categoryLabels,
+            datasets: [{
+                data: categoryData,
+                backgroundColor: [
+                    'rgba(255, 99, 132, 0.2)',
+                    'rgba(54, 162, 235, 0.2)',
+                    'rgba(255, 206, 86, 0.2)',
+                    'rgba(75, 192, 192, 0.2)',
+                    'rgba(153, 102, 255, 0.2)',
+                    'rgba(255, 159, 64, 0.2)'
+                ],
+                borderColor: [
+                    'rgba(255, 99, 132, 1)',
+                    'rgba(54, 162, 235, 1)',
+                    'rgba(255, 206, 86, 1)',
+                    'rgba(75, 192, 192, 1)',
+                    'rgba(153, 102, 255, 1)',
+                    'rgba(255, 159, 64, 1)'
+                ],
+                borderWidth: 1
+            }]
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                legend: {
+                    position: 'top',
+                },
+                tooltip: {
+                    callbacks: {
+                        label: function(tooltipItem) {
+                            return '₹' + tooltipItem.raw;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // Data for Top Spending Categories
+    const topCategoryLabels = {{ top_spending_categories.keys()|list|tojson }};
+    const topCategoryData = {{ top_spending_categories.values()|list|tojson }};
+
+    const topCategoriesCtx = document.getElementById('topCategoriesChart').getContext('2d');
+    const topCategoriesChart = new Chart(topCategoriesCtx, {
+        type: 'bar',
+        data: {
+            labels: topCategoryLabels,
+            datasets: [{
+                label: 'Amount Spent',
+                data: topCategoryData,
+                backgroundColor: 'rgba(75, 192, 192, 0.2)',
+                borderColor: 'rgba(75, 192, 192, 1)',
+                borderWidth: 1
+            }]
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                legend: {
+                    display: false
+                },
+                tooltip: {
+                    callbacks: {
+                        label: function(tooltipItem) {
+                            return '₹' + tooltipItem.raw;
+                        }
+                    }
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        callback: function(value) {
+                            return '₹' + value;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+
+// Data for Daily Spending
+    // Function to fetch data from Flask backend
+    function fetchDailySpendingData() {
+        const month = document.getElementById('month').value;
+        const year = document.getElementById('year').value;
+        fetch(`/daily_spending_data?month=${month}&year=${year}`)
+            .then(response => response.json())
+            .then(data => {
+                renderDailySpendingChart(data);
+            });
+    }
+
+    // Function to render the daily spending chart
+    function renderDailySpendingChart(data) {
+        const dailySpendingCtx = document.getElementById('dailySpendingChart').getContext('2d');
+        new Chart(dailySpendingCtx, {
+            type: 'line',
+            data: {
+                labels: data.labels,
+                datasets: [{
+                    label: 'Amount Spent',
+                    data: data.amounts,
+                    backgroundColor: 'rgba(153, 102, 255, 0.2)',
+                    borderColor: 'rgba(153, 102, 255, 1)',
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                responsive: true,
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        ticks: {
+                            callback: function(value) {
+                                return '₹' + value;
+                            }
+                        }
+                    }
+                },
+                plugins: {
+                    tooltip: {
+                        callbacks: {
+                            label: function(tooltipItem) {
+                                return '₹' + tooltipItem.raw;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // Fetch data and render charts initially and after filter is applied
+    document.addEventListener('DOMContentLoaded', fetchDailySpendingData);
+    document.querySelector('form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        fetchDailySpendingData();
+        document.querySelector('form').submit();  // Submit the form to filter the main statistics data
+    });
+
+</script>
+{% endblock %}
