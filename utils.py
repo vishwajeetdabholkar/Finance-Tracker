@@ -41,7 +41,7 @@ def add_expense_from_chat(user_id, question):
     }
     messages.append({"role": "system", "content": f"Read user input and only return a JSON response in this format: {output_format}. If there are multiple transaction details, return an array of JSON records in the given format."})
     messages.append({"role": "user", "content": question})
-
+    print(messages,"\n\n")
     chat_response = chat_completion_request(messages)
     assistant_message = chat_response.choices[0].message
     messages.append(assistant_message)
