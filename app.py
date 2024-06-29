@@ -313,7 +313,8 @@ def ai_chat():
                 
                 session['history'].append({'type': 'user', 'content': user_input})
                 session['history'].append({'type': 'bot', 'content': expenses})
-
+                session.modified = True  # Mark the session as modified
+                
                 return jsonify({'status': 'success', 'message': 'Transaction(s) added successfully!', 'expenses': expenses})
             else:
                 return jsonify({'status': 'error', 'message': 'No valid transaction found.'})
