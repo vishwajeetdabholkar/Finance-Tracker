@@ -23,6 +23,17 @@ def get_db():
     db = client[session['db_name']]
     return db
 
+@app.context_processor
+def inject_footer_text():
+    db_uri = session.get('db_uri', '')
+    if "mongodb.net" in db_uri:
+        footer_text = "Powered by Mongo"
+    elif "singlestore.com" in db_uri:
+        footer_text = "Powered by SingleStore"
+    else:
+        footer_text = "Developed by Vishwa"
+    return {'footer_text': footer_text}
+
 @app.route('/')
 def index():
     # Check if database connection details are in session
