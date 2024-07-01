@@ -1,0 +1,752 @@
+File: utils.py
+
+import json
+from openai import OpenAI
+from tenacity import retry, wait_random_exponential, stop_after_attempt
+from bson.objectid import ObjectId
+import datetime
+
+GPT_MODEL = "gpt-3.5-turbo"
+EMBEDDING_MODEL = "text-embedding-ada-002"
+client = OpenAI()
+
+@retry(wait=wait_random_exponential(min=1, max=40), stop=stop_after_attempt(3))
+def embedding_request(text):
+    response = client.embeddings.create(input=text, model=EMBEDDING_MODEL)
+    return response
+
+@retry(wait=wait_random_exponential(multiplier=1, max=40), stop=stop_after_attempt(3))
+def chat_completion_request(messages, tools=None, tool_choice=None, model=GPT_MODEL):
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+        return response
+    except Exception as e:
+        print("Unable to generate ChatCompletion response")
+        print(f"Exception: {e}")
+        return e
+
+def add_expense_from_chat(user_id, question):
+    messages = []
+    current_date = datetime.datetime.now().date()
+    output_format = {
+        "user_id": user_id,
+        "date": f"date mentioned by the user, otherwise use {current_date}",
+        "category": "select category based on the user input only from this: [Entertainment, Food, Utilities, Education, Travel expenses, Gifts, Rent, Subscriptions, Other]",
+        "amount": "amount mentioned in the user message, if not, add 0",
+        "payment_method": "select payment_method based on the user input only from this: [UPI, Cash]",
+        "description": "add description about the spend based on user input."
+    }
+    messages.append({"role": "system", "content": f"Read user input and only return a JSON response in this format: {output_format}. If there are multiple transaction details, return an array of JSON records in the given format."})
+    messages.append({"role": "user", "content": question})
+    print(messages,"\n\n")
+    chat_response = chat_completion_request(messages)
+    assistant_message = chat_response.choices[0].message
+    messages.append(assistant_message)
+    x = assistant_message.content
+    x = x.replace("'", '"')
+    expense_list = json.loads(x)
+    return expense_list
+
+=====
+
+File: app.py
+
+from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
+from datetime import datetime
+from pymongo import MongoClient
+from bson.objectid import ObjectId
+from utils import add_expense_from_chat
+import csv
+from io import StringIO
+
+
+app = Flask(__name__)
+app.secret_key = 'your_secret_key'
+
+@app.route('/setup', methods=['GET', 'POST'])
+def setup():
+    if request.method == 'POST':
+        session['db_uri'] = request.form['db_uri']
+        session['db_name'] = request.form['db_name']
+        return redirect(url_for('login'))
+    return render_template('setup.html')
+
+def get_db():
+    client = MongoClient(session['db_uri'])
+    db = client[session['db_name']]
+    return db
+
+@app.route('/')
+def index():
+    # Check if database connection details are in session
+    if 'db_uri' not in session or 'db_name' not in session:
+        return redirect(url_for('setup'))
+
+    # Check if user is logged in
+    if 'username' in session:
+        db = get_db()
+        transactions = db.transactions
+        user_id = session['user_id']
+        username = session['username']
+
+        user_transactions = list(transactions.find({"user_id": ObjectId(user_id)}))
+
+        # Ensure amounts are treated as floats for summation
+        total_amount = sum(float(transaction['amount']) for transaction in user_transactions)
+        total_upi = sum(float(transaction['amount']) for transaction in user_transactions if transaction['payment_method'] == 'UPI')
+        total_cash = sum(float(transaction['amount']) for transaction in user_transactions if transaction['payment_method'] == 'Cash')
+
+        return render_template('index.html', username=username, total_amount=total_amount, total_upi=total_upi, total_cash=total_cash)
+    return redirect(url_for('login'))
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        db = get_db()
+        users = db.users
+        username = request.form['username']
+        password = request.form['password']
+        user = users.find_one({"username": username, "password": password})
+        if user:
+            session['user_id'] = str(user['_id'])
+            session['username'] = user['username']
+            return redirect(url_for('index'))
+        else:
+            flash('Invalid username or password. Please try again.', 'error')
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('setup'))
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        db = get_db()
+        users = db.users
+        username = request.form['username']
+        email = request.form['email']
+        phone = request.form['phone']
+        password = request.form['password']
+        existing_user = users.find_one({"username": username})
+        if existing_user:
+            flash('Username already exists. Please choose a different one.', 'error')
+        else:
+            users.insert_one({"username": username, "email": email, "phone": phone, "password": password})
+            flash('Registration successful! Please log in.', 'success')
+            return redirect(url_for('login'))
+    return render_template('register.html')
+
+@app.route('/transactions')
+def transactions_view():
+    if 'username' in session:
+        db = get_db()
+        transactions = db.transactions
+        user_id = session['user_id']
+        username = session['username']
+        # user_transactions = list(transactions.find({"user_id": ObjectId(user_id)}))
+        user_transactions = list(transactions.find({"user_id": ObjectId(user_id)}).sort("date", -1))
+        return render_template('transaction.html', transactions=user_transactions, username=username)
+    else:
+        return redirect(url_for('login'))
+
+@app.route('/add_transaction', methods=['POST'])
+def add_transaction():
+    if 'username' in session:
+        db = get_db()
+        transactions = db.transactions
+        user_id = session['user_id']
+        date = request.form['date']
+        category = request.form['category']
+        amount = float(request.form['amount'])
+        payment_method = request.form['payment_method']
+        description = request.form['notes']
+
+        transactions.insert_one({
+            "user_id": ObjectId(user_id),
+            "date": date,
+            "category": category,
+            "amount": amount,
+            "payment_method": payment_method,
+            "description": description
+        })
+
+        return redirect(url_for('transactions_view'))
+    else:
+        return redirect(url_for('login'))
+
+@app.route('/delete_transaction/<transaction_id>', methods=['POST'])
+def delete_transaction(transaction_id):
+    if 'username' in session:
+        db = get_db()
+        transactions = db.transactions
+        transactions.delete_one({"_id": ObjectId(transaction_id)})
+        flash('Transaction deleted successfully.', 'success')
+    else:
+        flash('You must be logged in to delete a transaction.', 'error')
+    return redirect(url_for('transactions_view'))
+
+@app.route('/daily_spending_data', methods=['GET'])
+def daily_spending_data():
+    if 'username' in session:
+        db = get_db()
+        transactions = db.transactions
+        user_id = session['user_id']
+
+        month = request.args.get('month')
+        year = request.args.get('year')
+
+        pipeline = [
+            {"$match": {"user_id": ObjectId(user_id)}},
+            {"$match": {"date": {"$regex": f"^{year}-{month}"}}},
+            {"$group": {"_id": "$date", "total_amount": {"$sum": "$amount"}}},
+            {"$sort": {"_id": 1}}
+        ]
+        data = list(transactions.aggregate(pipeline))
+
+        labels = [item['_id'] for item in data]
+        amounts = [item['total_amount'] for item in data]
+
+        return jsonify({'labels': labels, 'amounts': amounts})
+    else:
+        return redirect(url_for('login'))
+
+@app.route('/current_month_spending_data', methods=['GET'])
+def current_month_spending_data():
+    if 'username' in session:
+        db = get_db()
+        transactions = db.transactions
+        user_id = session['user_id']
+
+        now = datetime.now()
+        month = now.strftime('%m')
+        year = now.strftime('%Y')
+
+        pipeline = [
+            {"$match": {"user_id": ObjectId(user_id)}},
+            {"$match": {"date": {"$regex": f"^{year}-{month}"}}},
+            {"$group": {"_id": "$date", "total_amount": {"$sum": "$amount"}}},
+            {"$sort": {"_id": 1}}
+        ]
+        data = list(transactions.aggregate(pipeline))
+
+        labels = [item['_id'] for item in data]
+        amounts = [item['total_amount'] for item in data]
+
+        return jsonify({'labels': labels, 'amounts': amounts})
+    else:
+        return redirect(url_for('login'))
+
+
+@app.route('/monthly_spending_data')
+def monthly_spending_data():
+    if 'username' in session:
+        db = get_db()
+        transactions = db.transactions
+        user_id = session['user_id']
+        
+        pipeline = [
+            {"$match": {"user_id": ObjectId(user_id)}},
+            {"$group": {"_id": {"$substr": ["$date", 0, 7]}, "total_amount": {"$sum": "$amount"}}}
+        ]
+        data = list(transactions.aggregate(pipeline))
+
+        labels = [datetime.strptime(item['_id'], '%Y-%m').strftime('%b %Y') for item in data]
+        amounts = [item['total_amount'] for item in data]
+
+        return jsonify({'labels': labels, 'amounts': amounts})
+    else:
+        return redirect(url_for('login'))
+
+@app.route('/statistics', methods=['GET', 'POST'])
+def statistics():
+    if 'username' in session:
+        db = get_db()
+        transactions = db.transactions
+        user_id = session.get('user_id')
+        
+        if user_id:
+            if request.method == 'POST':
+                month = request.form.get('month')
+                year = request.form.get('year')
+            else:
+                now = datetime.now()
+                month = now.strftime('%m')
+                year = now.strftime('%Y')
+
+            pipeline = [
+                {"$match": {"user_id": ObjectId(user_id)}},
+                {"$match": {"date": {"$regex": f"^{year}-{month}"}}}
+            ]
+
+            total_expenses_result = transactions.aggregate(pipeline + [
+                {"$group": {"_id": None, "total_amount": {"$sum": "$amount"}}}
+            ])
+            total_expenses = list(total_expenses_result)[0]['total_amount'] if total_expenses_result else 0
+
+            expense_by_category_result = transactions.aggregate(pipeline + [
+                {"$group": {"_id": "$category", "total_amount": {"$sum": "$amount"}}}
+            ])
+            expense_by_category = {item['_id']: item['total_amount'] for item in expense_by_category_result}
+
+            top_spending_categories_result = transactions.aggregate(pipeline + [
+                {"$group": {"_id": "$category", "total_amount": {"$sum": "$amount"}}},
+                {"$sort": {"total_amount": -1}},
+                {"$limit": 5}
+            ])
+            top_spending_categories = {item['_id']: item['total_amount'] for item in top_spending_categories_result}
+
+            return render_template('statistics.html', total_expenses=total_expenses, expense_by_category=expense_by_category,
+                                   top_spending_categories=top_spending_categories, selected_month=month, selected_year=year, datetime=datetime)
+        else:
+            return redirect(url_for('login'))
+    else:
+        return redirect(url_for('login'))
+
+@app.route('/upload_csv', methods=['POST'])
+def upload_csv():
+    if 'username' in session:
+        db = get_db()
+        transactions = db.transactions
+        user_id = session['user_id']
+
+        # Check if the CSV file is present in the request
+        if 'csv_file' not in request.files:
+            return jsonify({"status": "error", "message": "No file part"})
+        
+        file = request.files['csv_file']
+        if file.filename == '':
+            return jsonify({"status": "error", "message": "No selected file"})
+
+        if file and file.filename.endswith('.csv'):
+            stream = StringIO(file.stream.read().decode("UTF8"), newline=None)
+            csv_input = csv.reader(stream)
+
+            headers = next(csv_input)
+            required_headers = ["DATE", "CATEGORY", "AMOUNT", "PAYMENT_METHOD", "NOTES"]
+            
+            if not all(header in headers for header in required_headers):
+                return jsonify({"status": "error", "message": "CSV file must contain DATE, CATEGORY, AMOUNT, PAYMENT_METHOD, NOTES headers"})
+
+            for row in csv_input:
+                date, category, amount, payment_method, notes = row
+                transactions.insert_one({
+                    "user_id": ObjectId(user_id),
+                    "date": date,
+                    "category": category,
+                    "amount": float(amount),
+                    "payment_method": payment_method,
+                    "description": notes
+                })
+            
+            return jsonify({"status": "success", "message": "Transactions imported successfully"})
+        else:
+            return jsonify({"status": "error", "message": "Invalid file format. Please upload a CSV file."})
+    else:
+        return redirect(url_for('login'))
+
+@app.route('/ai_chat', methods=['GET', 'POST'])
+def ai_chat():
+    if 'username' in session:
+        if request.method == 'POST':
+            user_id = session['user_id']
+            user_input = request.json.get('user_input')
+            expenses = add_expense_from_chat(user_id, user_input)
+            if expenses:
+                db = get_db()
+                transactions = db.transactions
+                for expense in expenses:
+                    expense['user_id'] = ObjectId(expense['user_id'])
+                    transactions.insert_one(expense)
+                expenses = [convert_object_ids(expense) for expense in expenses]
+                
+                if 'history' not in session:
+                    session['history'] = []
+                
+                session['history'].append({'type': 'user', 'content': user_input})
+                session['history'].append({'type': 'bot', 'content': expenses})
+                session.modified = True  # Mark the session as modified
+                
+                return jsonify({'status': 'success', 'message': 'Transaction(s) added successfully!', 'expenses': expenses})
+            else:
+                return jsonify({'status': 'error', 'message': 'No valid transaction found.'})
+        return render_template('ai_chat.html', history=session.get('history', []))
+    else:
+        return redirect(url_for('login'))
+
+def convert_object_ids(expense):
+    if '_id' in expense:
+        expense['_id'] = str(expense['_id'])
+    if 'user_id' in expense:
+        expense['user_id'] = str(expense['user_id'])
+    return expense
+
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
+=======
+
+transaction.html :
+
+{% extends 'base.html' %}
+
+{% block title %}
+Transactions - Finance Tracker
+{% endblock %}
+
+{% block content %}
+<style>
+    body {
+        background-color: #f8f9fa;
+        font-family: 'Roboto', sans-serif;
+    }
+    .container {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 2rem;
+    }
+    h2 {
+        color: #2c3e50;
+        font-weight: 700;
+        margin-bottom: 1.5rem;
+    }
+    .btn {
+        border-radius: 25px;
+        padding: 0.5rem 1.5rem;
+        transition: all 0.3s ease;
+    }
+    .btn-primary {
+        background-color: #3498db;
+        border-color: #3498db;
+    }
+    .btn-primary:hover {
+        background-color: #2980b9;
+        border-color: #2980b9;
+    }
+    .btn-success {
+        background-color: #2ecc71;
+        border-color: #2ecc71;
+    }
+    .btn-success:hover {
+        background-color: #27ae60;
+        border-color: #27ae60;
+    }
+    .btn-info {
+        background-color: #9b59b6;
+        border-color: #9b59b6;
+    }
+    .btn-info:hover {
+        background-color: #8e44ad;
+        border-color: #8e44ad;
+    }
+    .table {
+        background-color: #fff;
+        border-radius: 10px;
+        box-shadow: 0 0 20px rgba(0, 0, 0, 0.1);
+    }
+    .table thead th {
+        background-color: #34495e;
+        color: #fff;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        border-bottom: none;
+    }
+    .table tbody tr:hover {
+        background-color: #f1f3f5;
+    }
+    .popup {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(0, 0, 0, 0.8);
+        z-index: 9999;
+    }
+    .popup-content {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background-color: #fff;
+        border-radius: 15px;
+        box-shadow: 0 0 30px rgba(0, 0, 0, 0.3);
+        padding: 2rem;
+        max-width: 500px;
+        width: 90%;
+    }
+    .close {
+        position: absolute;
+        top: 10px;
+        right: 15px;
+        color: #7f8c8d;
+        font-size: 1.5rem;
+        cursor: pointer;
+        transition: color 0.3s ease;
+    }
+    .close:hover {
+        color: #34495e;
+    }
+    .form-control, .form-select {
+        border-radius: 20px;
+        padding: 0.75rem 1.25rem;
+        border: 1px solid #bdc3c7;
+        transition: border-color 0.3s ease;
+    }
+    .form-control:focus, .form-select:focus {
+        border-color: #3498db;
+        box-shadow: 0 0 0 0.2rem rgba(52, 152, 219, 0.25);
+    }
+    .btn-danger {
+        background-color: #e74c3c;
+        border-color: #e74c3c;
+    }
+    .btn-danger:hover {
+        background-color: #c0392b;
+        border-color: #c0392b;
+    }
+    .filter-row {
+        background-color: #ecf0f1;
+        padding: 1rem;
+        border-radius: 10px;
+        margin-bottom: 1rem;
+    }
+</style>
+<div class="container">
+
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2><i class="fas fa-exchange-alt"></i>Transactions</h2>
+        <div class="action-buttons">
+            <button class="btn btn-primary" onclick="openPopup()"><i class="fas fa-plus me-2"></i>Add Transaction</button>
+            <button class="btn btn-success" onclick="downloadCSV()"><i class="fas fa-file-download me-2"></i>Export To CSV</button>
+            <button class="btn btn-info" onclick="document.getElementById('csvInput').click()"><i class="fas fa-file-upload me-2"></i>Import From CSV</button>
+            <input type="file" id="csvInput" style="display: none;" accept=".csv" onchange="uploadCSV(event)">
+        </div>
+    </div>
+
+    <div class="filter-row mt-4">
+        <div class="row">
+            <div class="col-md-3 mb-2 mb-md-0">
+                <input type="date" id="dateFilter" class="form-control" placeholder="Filter by date">
+            </div>
+            <div class="col-md-3 mb-2 mb-md-0">
+                <select id="categoryFilter" class="form-select">
+                    <option value="">All Categories</option>
+                    <option value="Entertainment">Entertainment</option>
+                    <option value="Food">Food</option>
+                    <option value="Utilities">Utilities</option>
+                    <option value="Education">Education</option>
+                    <option value="Travel expenses">Travel expenses</option>
+                    <option value="Gifts">Gifts</option>
+                    <option value="Rent">Rent</option>
+                    <option value="Subscriptions">Subscriptions</option>
+                </select>
+            </div>
+            <div class="col-md-3 mb-2 mb-md-0">
+                <select id="paymentMethodFilter" class="form-select">
+                    <option value="">All Payment Methods</option>
+                    <option value="UPI">UPI</option>
+                    <option value="Cash">Cash</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-primary w-100" onclick="applyFilters()">Apply Filters</button>
+                <button class="btn btn-secondary w-100" onclick="clearFilters()">Clear Filters</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="table-responsive mt-4">
+        <table class="table table-hover" id="transactionTable">
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Category</th>
+                    <th>Amount</th>
+                    <th>Payment Method</th>
+                    <th>Notes</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for transaction in transactions %}
+                <tr>
+                    <td>{{ transaction.date }}</td>
+                    <td><span class="badge bg-secondary">{{ transaction.category }}</span></td>
+                    <td>₹{{ transaction.amount }}</td>
+                    <td>{{ transaction.payment_method }}</td>
+                    <td>{{ transaction.description }}</td>
+                    <td>
+                        <form action="{{ url_for('delete_transaction', transaction_id=transaction._id) }}" method="post">
+                            <button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-trash-alt"></i></button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Popup window -->
+<div id="popup" class="popup">
+    <div class="popup-content">
+        <span class="close" onclick="closePopup()">&times;</span>
+        <h3 class="mb-4 text-center">Add New Transaction</h3>
+        <form action="{{ url_for('add_transaction') }}" method="post">
+            <div class="mb-3">
+                <label for="date" class="form-label">Date:</label>
+                <input type="date" id="date" name="date" class="form-control" required>
+            </div>
+            <div class="mb-3">
+                <label for="category" class="form-label">Category:</label>
+                <select id="category" name="category" class="form-select" required>
+                    <option value="Entertainment">Entertainment</option>
+                    <option value="Food">Food</option>
+                    <option value="Utilities">Utilities</option>
+                    <option value="Education">Education</option>
+                    <option value="Travel expenses">Travel expenses</option>
+                    <option value="Gifts">Gifts</option>
+                    <option value="Rent">Rent</option>
+                    <option value="Subscriptions">Subscriptions</option>
+                </select>
+            </div>
+            <div class="mb-3">
+                <label for="amount" class="form-label">Amount:</label>
+                <input type="number" id="amount" name="amount" class="form-control" required>
+            </div>
+            <div class="mb-3">
+                <label for="payment_method" class="form-label">Payment Method:</label>
+                <select id="payment_method" name="payment_method" class="form-select" required>
+                    <option value="UPI">UPI</option>
+                    <option value="Cash">Cash</option>
+                </select>
+            </div>
+            <div class="mb-3">
+                <label for="notes" class="form-label">Notes:</label>
+                <textarea id="notes" name="notes" class="form-control"></textarea>
+            </div>
+            <button type="submit" class="btn btn-primary w-100">Add Transaction</button>
+        </form>
+    </div>
+</div>
+
+<!-- Notification Popup -->
+<div id="notificationPopup" class="popup">
+    <div class="popup-content">
+        <span class="close" onclick="closeNotificationPopup()">&times;</span>
+        <p id="notificationMessage" class="mb-0 text-center"></p>
+    </div>
+</div>
+
+<script>
+    function openPopup() {
+        document.getElementById("popup").style.display = "block";
+    }
+
+    function closePopup() {
+        document.getElementById("popup").style.display = "none";
+    }
+
+    function openNotificationPopup(message) {
+        document.getElementById("notificationMessage").innerText = message;
+        document.getElementById("notificationPopup").style.display = "block";
+    }
+
+    function closeNotificationPopup() {
+        document.getElementById("notificationPopup").style.display = "none";
+    }
+
+    function uploadCSV(event) {
+        const file = event.target.files[0];
+        const formData = new FormData();
+        formData.append('csv_file', file);
+
+        fetch('/upload_csv', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'success') {
+                location.reload();
+                openNotificationPopup('Transactions added successfully!');
+            } else {
+                openNotificationPopup(data.message);
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            openNotificationPopup('An error occurred while uploading the file.');
+        });
+    }
+
+    function downloadCSV() {
+        const rows = document.querySelectorAll('table tbody tr');
+        let csvContent = 'Date,Category,Amount,Payment Method,Notes\n';
+
+        rows.forEach(row => {
+            const columns = row.querySelectorAll('td');
+            const rowData = Array.from(columns).map(column => column.textContent.replace(/\n/g, '').replace('₹', ''));
+            csvContent += rowData.join(',') + '\n';
+        });
+
+        const blob = new Blob([csvContent], { type: 'text/csv' });
+        const a = document.createElement('a');
+        a.href = window.URL.createObjectURL(blob);
+        a.download = 'transactions.csv';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+    }
+
+    function applyFilters() {
+        const dateFilter = document.getElementById('dateFilter').value.toLowerCase();
+        const categoryFilter = document.getElementById('categoryFilter').value;
+        const paymentMethodFilter = document.getElementById('paymentMethodFilter').value;
+
+        const table = document.getElementById('transactionTable');
+        const rows = table.getElementsByTagName('tr');
+
+        for (let i = 1; i < rows.length; i++) {
+            const row = rows[i];
+            const date = row.cells[0].innerText.toLowerCase();
+            const category = row.cells[1].innerText;
+            const paymentMethod = row.cells[3].innerText;
+
+            const dateMatch = date.includes(dateFilter);
+            const categoryMatch = categoryFilter === '' || category === categoryFilter;
+            const paymentMethodMatch = paymentMethodFilter === '' || paymentMethod === paymentMethodFilter;
+
+            if (dateMatch && categoryMatch && paymentMethodMatch) {
+                row.style.display = '';
+            } else {
+                row.style.display = 'none';
+            }
+        }
+    }
+
+    function clearFilters() {
+    // Reset filter inputs
+    document.getElementById('dateFilter').value = '';
+    document.getElementById('categoryFilter').value = '';
+    document.getElementById('paymentMethodFilter').value = '';
+
+    // Show all rows in the table
+    const table = document.getElementById('transactionTable');
+    const rows = table.getElementsByTagName('tr');
+    for (let i = 1; i < rows.length; i++) {
+        rows[i].style.display = '';
+    }
+}
+</script>
+{% endblock %}
