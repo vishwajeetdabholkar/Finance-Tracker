@@ -219,48 +219,53 @@ def monthly_spending_data():
 
 @app.route('/statistics', methods=['GET', 'POST'])
 def statistics():
-    if 'username' in session:
-        db = get_db()
-        transactions = db.transactions
-        user_id = session.get('user_id')
-        
-        if user_id:
-            if request.method == 'POST':
-                month = request.form.get('month')
-                year = request.form.get('year')
-            else:
-                now = datetime.now()
-                month = now.strftime('%m')
-                year = now.strftime('%Y')
-
-            pipeline = [
-                {"$match": {"user_id": ObjectId(user_id)}},
-                {"$match": {"date": {"$regex": f"^{year}-{month}"}}}
-            ]
-
-            total_expenses_result = transactions.aggregate(pipeline + [
-                {"$group": {"_id": None, "total_amount": {"$sum": "$amount"}}}
-            ])
-            total_expenses = list(total_expenses_result)[0]['total_amount'] if total_expenses_result else 0
-
-            expense_by_category_result = transactions.aggregate(pipeline + [
-                {"$group": {"_id": "$category", "total_amount": {"$sum": "$amount"}}}
-            ])
-            expense_by_category = {item['_id']: item['total_amount'] for item in expense_by_category_result}
-
-            top_spending_categories_result = transactions.aggregate(pipeline + [
-                {"$group": {"_id": "$category", "total_amount": {"$sum": "$amount"}}},
-                {"$sort": {"total_amount": -1}},
-                {"$limit": 5}
-            ])
-            top_spending_categories = {item['_id']: item['total_amount'] for item in top_spending_categories_result}
-
-            return render_template('statistics.html', total_expenses=total_expenses, expense_by_category=expense_by_category,
-                                   top_spending_categories=top_spending_categories, selected_month=month, selected_year=year, datetime=datetime)
-        else:
-            return redirect(url_for('login'))
-    else:
+    if 'username' not in session:
         return redirect(url_for('login'))
+    
+    db = get_db()
+    transactions = db.transactions
+    user_id = session.get('user_id')
+    
+    if not user_id:
+        return redirect(url_for('login'))
+    
+    if request.method == 'POST':
+        month = request.form.get('month')
+        year = request.form.get('year')
+    else:
+        now = datetime.now()
+        month = now.strftime('%m')
+        year = now.strftime('%Y')
+
+    pipeline = [
+        {"$match": {"user_id": ObjectId(user_id)}},
+        {"$match": {"date": {"$regex": f"^{year}-{month}"}}}
+    ]
+
+    total_expenses_result = list(transactions.aggregate(pipeline + [
+        {"$group": {"_id": None, "total_amount": {"$sum": "$amount"}}}
+    ]))
+    total_expenses = total_expenses_result[0]['total_amount'] if total_expenses_result else 0
+
+    expense_by_category_result = list(transactions.aggregate(pipeline + [
+        {"$group": {"_id": "$category", "total_amount": {"$sum": "$amount"}}}
+    ]))
+    expense_by_category = {item['_id']: item['total_amount'] for item in expense_by_category_result}
+
+    top_spending_categories_result = list(transactions.aggregate(pipeline + [
+        {"$group": {"_id": "$category", "total_amount": {"$sum": "$amount"}}},
+        {"$sort": {"total_amount": -1}},
+        {"$limit": 5}
+    ]))
+    top_spending_categories = {item['_id']: item['total_amount'] for item in top_spending_categories_result}
+
+    return render_template('statistics.html', 
+                           total_expenses=total_expenses, 
+                           expense_by_category=expense_by_category,
+                           top_spending_categories=top_spending_categories, 
+                           selected_month=month, 
+                           selected_year=year, 
+                           datetime=datetime)
 
 @app.route('/upload_csv', methods=['POST'])
 def upload_csv():
