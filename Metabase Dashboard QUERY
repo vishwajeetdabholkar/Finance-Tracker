@@ -1,0 +1,115 @@
+db.createView("usersvw","users",[{$view:{json:true,inferred:true}}])
+db.createView("transactionvw","transactions",[{$view:{json:true,inferred:true}}])
+
+
+----Dashboard query----
+------------------------Current Year Spend
+[
+  {
+    "$group": {
+      "_id": null,
+      "sum": {
+        "$sum": "$amount"
+      }
+    }
+  },
+  {
+    "$sort": {
+      "_id": 1
+    }
+  },
+  {
+    "$project": {
+      "_id": false,
+      "sum": true
+    }
+  }
+]
+
+-------------------------Overall Transaction Type
+[
+  {
+    $group: {
+      _id: "$payment_method",
+      count: { $sum: 1 }
+    }
+  },
+  {
+    $group: {
+      _id: null,
+      total: { $sum: "$count" },
+      paymentMethods: {
+        $push: {
+          payment_method: "$_id",
+          count: "$count"
+        }
+      }
+    }
+  },
+  {
+    $unwind: "$paymentMethods"
+  },
+  {
+    $project: {
+      _id: 0,
+      payment_method: "$paymentMethods.payment_method",
+      count: "$paymentMethods.count",
+      percentage: {
+        $multiply: [
+          { $divide: ["$paymentMethods.count", "$total"] },
+          100
+        ]
+      }
+    }
+  },
+  {
+    $sort: { percentage: -1 }
+  }
+]
+----------------------------Employee claiming Expense
+
+
+[
+  {
+    "$group": {
+      "_id": null,
+      "count": {
+        "$sum": 1
+      }
+    }
+  },
+  {
+    "$sort": {
+      "_id": 1
+    }
+  },
+  {
+    "$project": {
+      "_id": false,
+      "count": true
+    }
+  }
+]
+-----------------------------Monthly Expense view
+
+  SELECT
+  DATE_FORMAT(`doc.date`, '%M %Y') AS month,
+  SUM(`doc.amount`) AS total_amount
+FROM
+  transactionsvw
+GROUP BY
+  DATE_FORMAT(`doc.date`, '%M %Y')
+ORDER BY
+  DATE_FORMAT(`doc.date`, '%Y-%m');
+
+  -----------------------Individual spent analysis
+
+  [
+  {
+    $group: {
+      _id: "$user_id",
+      totalSpent: { $sum: "$amount" }
+    }
+  }
+]
+-------------------------END----------------------------
