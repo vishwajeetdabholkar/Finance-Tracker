@@ -6,6 +6,9 @@ from utils import add_expense_from_chat
 import csv
 from io import StringIO
 
+import logging
+
+logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
 app.secret_key = 'your_secret_key'
@@ -316,11 +319,28 @@ def ai_chat():
             user_id = session['user_id']
             user_input = request.json.get('user_input')
             expenses = add_expense_from_chat(user_id, user_input)
+            
+            # Debugging: Print the expenses to verify their structure
+            print("Expenses:", expenses)
+            
+            # Ensure expenses is always a list
+            if isinstance(expenses, dict):
+                expenses = [expenses]
+            
             if expenses:
                 db = get_db()
                 transactions = db.transactions
                 for expense in expenses:
-                    expense['user_id'] = ObjectId(expense['user_id'])
+                    # Ensure expense is a dictionary and has 'user_id' key
+                    if isinstance(expense, dict) and 'user_id' in expense:
+                        try:
+                            expense['user_id'] = ObjectId(expense['user_id'])
+                        except Exception as e:
+                            print(f"Error converting user_id to ObjectId: {e}")
+                            return jsonify({'status': 'error', 'message': 'Invalid user_id format.'})
+                    else:
+                        print("Expense format is invalid:", expense)
+                        return jsonify({'status': 'error', 'message': 'Invalid expense format.'})
                     transactions.insert_one(expense)
                 expenses = [convert_object_ids(expense) for expense in expenses]
                 
@@ -336,7 +356,9 @@ def ai_chat():
                 return jsonify({'status': 'error', 'message': 'No valid transaction found.'})
         return render_template('ai_chat.html', history=session.get('history', []))
     else:
+        logging.info("User not logged in. Redirecting to login page.")
         return redirect(url_for('login'))
+
 
 def convert_object_ids(expense):
     if '_id' in expense:
